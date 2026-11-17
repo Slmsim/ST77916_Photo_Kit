@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>360×360 RGB565 변환기</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    color-scheme: dark;
+    --background: #101315;
+    --surface: #191e20;
+    --border: #333e41;
+    --text: #f1f5f3;
+    --muted: #aab9b7;
+    --accent: #c7fb98;
+  }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--text);
+    font: 16px/1.55 Inter, system-ui, sans-serif;
+  }
+  main { max-width: 920px; margin: auto; padding: clamp(26px, 6vw, 68px) 22px; }
+  h1 { margin: 0; font-size: clamp(29px, 5vw, 46px); line-height: 1.15; letter-spacing: -.055em; }
+  .intro { color: var(--muted); margin: 12px 0 28px; }
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 28px;
+    align-items: center;
+    padding: clamp(18px, 4vw, 34px);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    background: var(--surface);
+  }
+  .preview {
+    width: 100%;
+    max-width: 360px;
+    aspect-ratio: 1;
+    margin: auto;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    position: relative;
+    border-radius: 50%;
+    border: 1px solid #587164;
+    background: radial-gradient(circle, #222d2b, #131b19 75%);
+  }
+  .preview canvas { width: 100%; height: 100%; position: absolute; inset: 0; }
+  .preview span { padding: 18px; text-align: center; color: var(--muted); }
+  .controls { display: grid; gap: 16px; }
+  .field { display: grid; gap: 6px; }
+  label { font-weight: 600; }
+  input[type=file], select, button {
+    width: 100%;
+    min-height: 45px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 9px 12px;
+    font: inherit;
+  }
+  input[type=file]::file-selector-button {
+    border: 0;
+    border-radius: 5px;
+    padding: 5px 9px;
+    margin-right: 10px;
+    background: #354448;
+    color: var(--text);
+    cursor: pointer;
+  }
+  select, input[type=file] { background: #151a1c; color: var(--text); }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+  input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  button { border-color: transparent; background: var(--accent); color: #142009; cursor: pointer; font-weight: 700; }
+  button:disabled { background: #394641; color: #bdc7c1; cursor: default; }
+  .supported, footer, #status { color: var(--muted); font-size: .9rem; }
+  #status { margin: 0; min-height: 1.5em; overflow-wrap: anywhere; }
+  #status.error { color: #ffaea4; }
+  footer { margin-top: 17px; }
+  @media (max-width: 640px) {
+    .workspace { grid-template-columns: 1fr; }
+    .preview { max-width: 300px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>360×360 RGB565 변환기</h1>
+  <p class="intro">사진을 원형 LCD에서 미리 보고 Arduino용 헤더로 저장해.</p>
+  <div class="workspace">
+    <div class="preview">
+      <span id="placeholder">사진을 선택하면<br>여기에 표시돼.</span>
+      <canvas id="preview" width="360" height="360" aria-label="원형 LCD 미리보기" hidden></canvas>
+    </div>
+    <div class="controls">
+      <div class="field">
+        <label for="photo">사진</label>
+        <input id="photo" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp,image/bmp">
+        <span class="supported">JPG, PNG, WebP, BMP · 브라우저 안에서 변환</span>
+      </div>
+      <div class="field">
+        <label for="fit">프레임 맞추기</label>
+        <select id="fit">
+          <option value="cover">가운데 기준으로 화면 채우기</option>
+          <option value="contain">사진 전체를 사각 프레임에 맞추기</option>
+        </select>
+      </div>
+      <label class="check"><input id="swap" type="checkbox">빨강과 파랑 바꾸기</label>
+      <button id="save" type="button" disabled>image_rgb565.h 다운로드</button>
+      <p id="status" role="status"></p>
+    </div>
+  </div>
+  <footer>헤더를 ST77916_Photo.ino 옆에 넣고 Arduino IDE에서 다시 업로드해.</footer>
+</main>
+<script>
+  const size = 360;
+  const upload = document.getElementById('photo');
+  const fit = document.getElementById('fit');
+  const swap = document.getElementById('swap');
+  const save = document.getElementById('save');
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+  const placeholder = document.getElementById('placeholder');
+  const context = preview.getContext('2d', { alpha: false, willReadFrequently: true });
+
+  let image = null;
+  let values = null;
+  let currentLoad = 0;
+  let filename = '';
+
+  function render() {
+    if (!image) return;
+    const scale = (fit.value === 'cover' ? Math.max : Math.min)(
+      size / image.naturalWidth, size / image.naturalHeight
+    );
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, size, size);
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
+    const frame = context.getImageData(0, 0, size, size);
+    const rgba = frame.data;
+    values = new Uint16Array(size * size);
+
+    for (let pixel = 0; pixel < values.length; pixel++) {
+      const i = pixel * 4;
+      const red = rgba[i + (swap.checked ? 2 : 0)] >> 3;
+      const green = rgba[i + 1] >> 2;
+      const blue = rgba[i + (swap.checked ? 0 : 2)] >> 3;
+      values[pixel] = (red << 11) | (green << 5) | blue;
+      rgba[i] = (red << 3) | (red >> 2);
+      rgba[i + 1] = (green << 2) | (green >> 4);
+      rgba[i + 2] = (blue << 3) | (blue >> 2);
+    }
+
+    context.putImageData(frame, 0, 0);
+    placeholder.hidden = true;
+    preview.hidden = false;
+    save.disabled = false;
+    status.textContent = filename + ' · RGB565 · 129,600픽셀';
+  }
+
+  upload.addEventListener('change', async () => {
+    const file = upload.files[0];
+    if (!file) return;
+    const load = ++currentLoad;
+    const url = URL.createObjectURL(file);
+    const next = new Image();
+    image = null;
+    values = null;
+    save.disabled = true;
+    preview.hidden = true;
+    placeholder.hidden = false;
+    status.classList.remove('error');
+    status.textContent = '사진을 읽는 중…';
+
+    try {
+      next.src = url;
+      await next.decode();
+      if (load !== currentLoad) return;
+      image = next;
+      filename = file.name;
+      render();
+    } catch {
+      if (load !== currentLoad) return;
+      status.classList.add('error');
+      status.textContent = '사진을 열 수 없어. JPG 또는 PNG로 저장해서 다시 선택해.';
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
+
+  fit.addEventListener('change', render);
+  swap.addEventListener('change', render);
+  save.addEventListener('click', () => {
+    if (!values) return;
+    const lines = [
+      '#pragma once',
+      '#include <Arduino.h>',
+      '',
+      'constexpr uint16_t IMAGE_WIDTH = 360;',
+      'constexpr uint16_t IMAGE_HEIGHT = 360;',
+      'static const uint16_t IMAGE_PIXELS[] PROGMEM = {',
+    ];
+    for (let i = 0; i < values.length; i += 12) {
+      const hex = Array.from(values.subarray(i, i + 12), value =>
+        '0x' + value.toString(16).toUpperCase().padStart(4, '0')
+      );
+      lines.push('  ' + hex.join(', ') + ',');
+    }
+    lines.push('};', '');
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'image_rgb565.h';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+</script>
+</body>
+</html>
